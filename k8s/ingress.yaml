@@ -1,0 +1,157 @@
+# Application Load Balancer Ingress
+# This ingress creates an AWS ALB to route external traffic to services
+# Includes SSL termination, geo-restriction, and path-based routing
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: character-sheet-ingress
+  namespace: character-sheet
+  labels:
+    app: character-sheet
+  annotations:
+    # AWS Load Balancer Controller annotations
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: character-sheet-alb
+    
+    # Health check configuration
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '10'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
+    
+    # SSL Configuration (uncomment when you have a certificate)
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:region:account:certificate/certificate-id
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    # alb.ingress.kubernetes.io/ssl-redirect: '443'
+    
+    # Performance optimization
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      routing.http2.enabled=true,
+      idle_timeout.timeout_seconds=60,
+      deletion_protection.enabled=false
+    
+    # Geo-restriction: Only allow traffic from US, Canada, and Europe
+    # This uses WAF rules to restrict access by geography
+    alb.ingress.kubernetes.io/wafv2-acl-arn: "arn:aws:wafv2:us-west-2:ACCOUNT_ID:regional/webacl/character-sheet-geo-restriction/WEB_ACL_ID"
+    
+    # Security headers
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      routing.http.response_header.server=,
+      routing.http.response_header.x-frame-options=DENY,
+      routing.http.response_header.x-content-type-options=nosniff,
+      routing.http.response_header.x-xss-protection=1; mode=block,
+      routing.http.response_header.strict-transport-security=max-age=31536000; includeSubDomains
+
+spec:
+  # Default backend (fallback)
+  defaultBackend:
+    service:
+      name: backend-internal
+      port:
+        number: 8080
+  
+  # Routing rules
+  rules:
+  - http:
+      paths:
+      # Backend API routes
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-internal
+            port:
+              number: 8080
+      
+      # Health check endpoint
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: backend-internal
+            port:
+              number: 8080
+      
+      # Catch-all for backend (if no frontend in cluster)
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-internal
+            port:
+              number: 8080
+
+---
+# WAF Web ACL for Geo-restriction
+# This creates a WAF rule to restrict access based on geography
+# Note: This is a separate resource that needs to be created
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: waf-geo-restriction-template
+  namespace: character-sheet
+  labels:
+    app: character-sheet
+  annotations:
+    description: "Template for creating WAF geo-restriction rules"
+data:
+  waf-template.json: |
+    {
+      "Name": "character-sheet-geo-restriction",
+      "Description": "Geo-restriction for character sheet application",
+      "Scope": "REGIONAL",
+      "DefaultAction": {
+        "Type": "BLOCK"
+      },
+      "Rules": [
+        {
+          "Name": "AllowUSCanadaEurope",
+          "Priority": 1,
+          "Statement": {
+            "GeoMatchStatement": {
+              "CountryCodes": [
+                "US", "CA", "GB", "DE", "FR", "IT", "ES", "NL", "BE", "AT",
+                "CH", "SE", "NO", "DK", "FI", "IE", "PT", "GR", "PL", "CZ",
+                "HU", "SK", "SI", "EE", "LV", "LT", "LU", "MT", "CY", "BG",
+                "RO", "HR", "IS"
+              ]
+            }
+          },
+          "Action": {
+            "Allow": {}
+          },
+          "VisibilityConfig": {
+            "SampledRequestsEnabled": true,
+            "CloudWatchMetricsEnabled": true,
+            "MetricName": "AllowUSCanadaEurope"
+          }
+        },
+        {
+          "Name": "RateLimitRule",
+          "Priority": 2,
+          "Statement": {
+            "RateBasedStatement": {
+              "Limit": 2000,
+              "AggregateKeyType": "IP"
+            }
+          },
+          "Action": {
+            "Block": {}
+          },
+          "VisibilityConfig": {
+            "SampledRequestsEnabled": true,
+            "CloudWatchMetricsEnabled": true,
+            "MetricName": "RateLimitRule"
+          }
+        }
+      ],
+      "VisibilityConfig": {
+        "SampledRequestsEnabled": true,
+        "CloudWatchMetricsEnabled": true,
+        "MetricName": "CharacterSheetWAF"
+      }
+    } 

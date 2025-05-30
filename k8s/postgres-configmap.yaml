@@ -1,0 +1,33 @@
+# PostgreSQL ConfigMap
+# This ConfigMap stores non-sensitive configuration data for PostgreSQL
+# ConfigMaps are used to separate configuration from application code
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: character-sheet
+  labels:
+    app: postgres
+    component: database
+data:
+  # Database configuration
+  POSTGRES_DB: "character_sheets"
+  POSTGRES_USER: "postgres"
+  
+  # PostgreSQL configuration file (optional custom settings)
+  postgresql.conf: |
+    # Basic PostgreSQL configuration for small workload
+    shared_buffers = 128MB
+    effective_cache_size = 512MB
+    maintenance_work_mem = 64MB
+    checkpoint_completion_target = 0.7
+    wal_buffers = 16MB
+    default_statistics_target = 100
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    
+    # Logging configuration
+    log_statement = 'all'
+    log_duration = on
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h ' 

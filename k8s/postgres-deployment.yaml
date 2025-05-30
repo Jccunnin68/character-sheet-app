@@ -1,0 +1,124 @@
+# PostgreSQL Deployment
+# This deployment creates and manages PostgreSQL database pods
+# Includes persistent storage, health checks, and proper resource limits
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: character-sheet
+  labels:
+    app: postgres
+    component: database
+spec:
+  # Single replica for simplicity (in production, consider PostgreSQL HA solutions)
+  replicas: 1
+  
+  selector:
+    matchLabels:
+      app: postgres
+      component: database
+  
+  template:
+    metadata:
+      labels:
+        app: postgres
+        component: database
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine  # Alpine version for smaller image size
+        
+        # Resource limits to prevent resource starvation
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        
+        # Container port
+        ports:
+        - containerPort: 5432
+          name: postgres
+          protocol: TCP
+        
+        # Environment variables from ConfigMap and Secret
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: POSTGRES_PASSWORD
+        
+        # Health checks
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        # Persistent volume mount
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+          subPath: postgres  # Use subPath to avoid permission issues
+        - name: postgres-init
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
+      
+      # Volumes
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - name: postgres-init
+        configMap:
+          name: postgres-init-scripts
+          optional: true  # Make this optional in case init scripts aren't provided
+
+---
+# Persistent Volume Claim for PostgreSQL data
+# This ensures data survives pod restarts and rescheduling
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: character-sheet
+  labels:
+    app: postgres
+    component: database
+spec:
+  accessModes:
+    - ReadWriteOnce  # Single node access (suitable for PostgreSQL)
+  resources:
+    requests:
+      storage: 5Gi  # 5GB storage (adjust based on needs)
+  storageClassName: gp2  # AWS EBS GP2 storage class (standard on EKS) 

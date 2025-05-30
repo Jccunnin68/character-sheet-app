@@ -74,4 +74,17 @@ variable "enable_nat_gateway" {
   description = "Enable NAT Gateway (costs money) - use false for Free Tier"
   type        = bool
   default     = false
+}
+
+variable "ssh_key_name" {
+  description = "EC2 Key Pair name for SSH access to EKS nodes (optional, for debugging)"
+  type        = string
+  default     = null
+}
+
+variable "api_key" {
+  description = "API key for external integrations (optional)"
+  type        = string
+  default     = null
+  sensitive   = true
 } 

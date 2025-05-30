@@ -1,0 +1,88 @@
+# Kustomization file for Character Sheet application
+# This file defines how to deploy all Kubernetes resources together
+# Kustomize allows for easy management and customization of Kubernetes manifests
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Metadata for this deployment
+metadata:
+  name: character-sheet-app
+  annotations:
+    description: "Character Sheet application deployment for EKS with AWS Secrets Manager"
+
+# Resources to deploy (order matters for dependencies)
+resources:
+  # 1. Namespace (must be first)
+  - namespace.yaml
+  
+  # 2. Configuration (ConfigMaps and External Secrets)
+  - postgres-configmap.yaml
+  - external-secrets.yaml  # Replaces postgres-secret.yaml
+  
+  # 3. Storage (PVCs)
+  - postgres-deployment.yaml  # Includes PVC
+  
+  # 4. Services (networking)
+  - postgres-service.yaml
+  - backend-service.yaml
+  
+  # 5. Workloads (Deployments)
+  - backend-deployment.yaml
+  
+  # 6. Ingress (external access)
+  - ingress.yaml
+
+# Common labels applied to all resources
+commonLabels:
+  app.kubernetes.io/name: character-sheet
+  app.kubernetes.io/instance: production
+  app.kubernetes.io/version: "1.0.0"
+  app.kubernetes.io/component: web-application
+  app.kubernetes.io/part-of: character-sheet-system
+  app.kubernetes.io/managed-by: kustomize
+
+# Common annotations
+commonAnnotations:
+  deployment.kubernetes.io/created-by: "terraform-eks-deployment"
+  deployment.kubernetes.io/environment: "production"
+  secrets.external-secrets.io/backend: "aws-secrets-manager"
+
+# Namespace for all resources
+namespace: character-sheet
+
+# Resource generation options
+generatorOptions:
+  disableNameSuffixHash: false  # Add hash suffix to generated resources
+  labels:
+    generator: kustomize
+
+# Images to be used (can be overridden)
+images:
+  - name: character-sheet-backend
+    newTag: latest
+    digest: ""  # Use specific digest in production
+  - name: postgres
+    newName: postgres
+    newTag: 15-alpine
+
+# Replica count patches (for scaling)
+replicas:
+  - name: backend-deployment
+    count: 2
+  - name: postgres-deployment
+    count: 1
+
+# ConfigMap and Secret generators (if using generators instead of files)
+# Note: We now use External Secrets Operator instead of static secrets
+# configMapGenerator:
+#   - name: app-config
+#     literals:
+#       - LOG_LEVEL=info
+#       - DEBUG=false
+
+# secretGenerator:
+#   - name: app-secrets
+#     literals:
+#       - JWT_SECRET=your-secret-here
+#     type: Opaque 

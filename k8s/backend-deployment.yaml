@@ -1,0 +1,160 @@
+# Backend API Deployment
+# This deployment manages the Go backend API pods
+# Includes horizontal scaling, health checks, and environment configuration
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deployment
+  namespace: character-sheet
+  labels:
+    app: backend
+    component: api
+spec:
+  # Horizontal scaling configuration
+  replicas: 2  # Start with 2 replicas for high availability
+  
+  selector:
+    matchLabels:
+      app: backend
+      component: api
+  
+  # Rolling update strategy for zero-downtime deployments
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1      # Allow 1 pod to be unavailable during updates
+      maxSurge: 1           # Allow 1 extra pod during updates
+  
+  template:
+    metadata:
+      labels:
+        app: backend
+        component: api
+    spec:
+      containers:
+      - name: backend
+        # Use ECR image URL (replace ACCOUNT_ID and REGION)
+        # image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/character-sheet-backend:latest
+        image: character-sheet-backend:latest  # Local development image
+        
+        # Resource limits and requests
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        
+        # Container ports
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        
+        # Environment variables
+        env:
+        - name: PORT
+          value: "8080"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: DATABASE_URL
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: backend-secret
+              key: JWT_SECRET
+        - name: GIN_MODE
+          value: "release"  # Production mode for Gin framework
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        # Startup probe for slower startup times
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 10  # Allow up to 50 seconds for startup
+      
+      # Pod-level configuration
+      restartPolicy: Always
+      
+      # Security context (run as non-root user)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+---
+# Horizontal Pod Autoscaler for Backend
+# Automatically scales pods based on CPU/memory usage
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: character-sheet
+  labels:
+    app: backend
+    component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend-deployment
+  
+  # Scaling configuration
+  minReplicas: 2   # Minimum number of pods
+  maxReplicas: 10  # Maximum number of pods
+  
+  # Scaling metrics
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70  # Scale up when average CPU > 70%
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80  # Scale up when average memory > 80%
+  
+  # Scaling behavior (optional - prevents aggressive scaling)
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60 

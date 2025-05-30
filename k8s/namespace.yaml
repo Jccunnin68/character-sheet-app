@@ -1,0 +1,14 @@
+# Kubernetes Namespace Configuration
+# This file creates a dedicated namespace for the character sheet application
+# Namespaces provide logical separation of resources within a Kubernetes cluster
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: character-sheet
+  labels:
+    name: character-sheet
+    environment: production
+    app: character-sheet
+  annotations:
+    description: "Namespace for Character Sheet application components" 
