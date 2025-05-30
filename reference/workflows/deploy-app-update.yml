@@ -1,0 +1,249 @@
+# GitHub Actions Workflow for Application Updates
+# This workflow deploys application updates to an existing EKS cluster
+# without redeploying the entire infrastructure (faster deployments)
+
+name: Deploy Application Update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'k8s/**'
+      - 'docker-compose.yml'
+      - 'Dockerfile*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+      image_tag:
+        description: 'Docker image tag to deploy'
+        required: false
+        default: 'latest'
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REPOSITORY: character-sheet-backend
+  EKS_CLUSTER_NAME: character-sheet-prod-eks
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'prod' }}
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy Application
+    runs-on: ubuntu-latest
+    
+    permissions:
+      id-token: write   # Required for OIDC
+      contents: read    # Required to checkout code
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-AppDeploy
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Get commit hash
+      id: commit
+      run: echo "short_sha=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+    - name: Set image tag
+      id: image-tag
+      run: |
+        if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+          echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+        else
+          echo "tag=${{ steps.commit.outputs.short_sha }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build Docker image
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.image-tag.outputs.tag }} ./backend
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.image-tag.outputs.tag }} $ECR_REGISTRY/$ECR_REPOSITORY:latest
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+    - name: Push Docker image to ECR
+      run: |
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.image-tag.outputs.tag }}
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Install Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: '3.12.0'
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Verify cluster access
+      run: |
+        kubectl get nodes
+        kubectl get namespaces
+
+    - name: Check if External Secrets Operator is installed
+      id: check-eso
+      run: |
+        if kubectl get namespace external-secrets-system > /dev/null 2>&1; then
+          echo "eso_installed=true" >> $GITHUB_OUTPUT
+        else
+          echo "eso_installed=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Install External Secrets Operator (if not present)
+      if: steps.check-eso.outputs.eso_installed == 'false'
+      run: |
+        echo "Installing External Secrets Operator..."
+        helm repo add external-secrets https://charts.external-secrets.io
+        helm repo update
+        helm install external-secrets external-secrets/external-secrets \
+          -n external-secrets-system \
+          --create-namespace \
+          -f k8s/external-secrets-operator-values.yaml
+        
+        # Wait for External Secrets Operator to be ready
+        kubectl wait --for=condition=available --timeout=300s deployment/external-secrets -n external-secrets-system
+        kubectl wait --for=condition=available --timeout=300s deployment/external-secrets-webhook -n external-secrets-system
+
+    - name: Process External Secrets template
+      run: |
+        cd k8s
+        
+        # Get AWS region and IAM role ARN
+        AWS_REGION_VALUE="${{ env.AWS_REGION }}"
+        EXTERNAL_SECRETS_ROLE_ARN=$(aws sts get-caller-identity --query "Account" --output text | \
+          xargs -I {} echo "arn:aws:iam::{}:role/character-sheet-${{ env.ENVIRONMENT }}-external-secrets-role")
+        
+        # Process external secrets template
+        sed -e "s/AWS_REGION_PLACEHOLDER/${AWS_REGION_VALUE}/g" \
+            -e "s|IAM_ROLE_ARN_PLACEHOLDER|${EXTERNAL_SECRETS_ROLE_ARN}|g" \
+            external-secrets.yaml > external-secrets-processed.yaml
+
+    - name: Update Kubernetes manifests with new image
+      run: |
+        cd k8s
+        
+        # Update image tag in kustomization
+        if command -v kustomize > /dev/null 2>&1; then
+          kustomize edit set image character-sheet-backend=${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ steps.image-tag.outputs.tag }}
+        else
+          # Fallback: direct sed replacement in deployment file
+          sed -i "s|image: character-sheet-backend:.*|image: ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ steps.image-tag.outputs.tag }}|g" backend-deployment.yaml
+        fi
+
+    - name: Deploy to Kubernetes
+      run: |
+        cd k8s
+        
+        # Replace processed external secrets
+        if [ -f external-secrets-processed.yaml ]; then
+          mv external-secrets.yaml external-secrets-original.yaml
+          mv external-secrets-processed.yaml external-secrets.yaml
+        fi
+        
+        # Apply Kubernetes manifests
+        kubectl apply -k .
+        
+        # Restore original external secrets file
+        if [ -f external-secrets-original.yaml ]; then
+          mv external-secrets-original.yaml external-secrets.yaml
+        fi
+
+    - name: Wait for External Secrets to sync
+      run: |
+        echo "Waiting for External Secrets to process..."
+        kubectl wait --for=condition=Ready externalsecret/postgres-external-secret -n character-sheet --timeout=120s || true
+        kubectl wait --for=condition=Ready externalsecret/backend-external-secret -n character-sheet --timeout=120s || true
+
+    - name: Wait for deployment rollout
+      run: |
+        echo "Waiting for deployments to be ready..."
+        kubectl rollout status deployment/backend-deployment -n character-sheet --timeout=300s
+        kubectl rollout status deployment/postgres-deployment -n character-sheet --timeout=300s
+
+    - name: Get deployment status
+      run: |
+        echo "=== Deployment Status ==="
+        kubectl get pods -n character-sheet -o wide
+        
+        echo "=== Services ==="
+        kubectl get svc -n character-sheet
+        
+        echo "=== Ingress ==="
+        kubectl get ingress -n character-sheet
+        
+        echo "=== External Secrets Status ==="
+        kubectl get externalsecrets -n character-sheet
+
+    - name: Get application URL
+      id: app-url
+      run: |
+        ALB_DNS=$(kubectl get ingress character-sheet-ingress -n character-sheet -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        if [ -n "$ALB_DNS" ]; then
+          echo "url=http://${ALB_DNS}" >> $GITHUB_OUTPUT
+          echo "health_url=http://${ALB_DNS}/health" >> $GITHUB_OUTPUT
+        else
+          echo "url=Not available yet" >> $GITHUB_OUTPUT
+          echo "health_url=Not available yet" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Test application health
+      if: steps.app-url.outputs.health_url != 'Not available yet'
+      run: |
+        echo "Testing application health..."
+        sleep 30  # Give ALB time to register healthy targets
+        
+        for i in {1..5}; do
+          if curl -f -s "${{ steps.app-url.outputs.health_url }}" > /dev/null; then
+            echo "✅ Health check passed!"
+            break
+          else
+            echo "⏳ Health check attempt $i failed, retrying in 10 seconds..."
+            sleep 10
+          fi
+        done
+
+    - name: Deployment summary
+      run: |
+        echo "🚀 Deployment Complete!"
+        echo "📦 Image: ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ steps.image-tag.outputs.tag }}"
+        echo "🌐 Application URL: ${{ steps.app-url.outputs.url }}"
+        echo "❤️ Health Check: ${{ steps.app-url.outputs.health_url }}"
+        echo "📊 Monitor: kubectl get all -n character-sheet"
+
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ Deployment successful!"
+        else
+          echo "❌ Deployment failed!"
+          echo "Debug commands:"
+          echo "kubectl describe pods -n character-sheet"
+          echo "kubectl logs -f deployment/backend-deployment -n character-sheet"
+          echo "kubectl get events -n character-sheet --sort-by='.lastTimestamp'"
+        fi 

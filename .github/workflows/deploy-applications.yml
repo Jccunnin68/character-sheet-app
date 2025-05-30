@@ -1,0 +1,547 @@
+# GitHub Actions Workflow for Application Deployment
+# This workflow handles application/backend deployments
+# CI/CD Flow: main → Dev, release → PreProd, Manual → Production
+# MANUAL: Production deployments require manual trigger
+
+name: Deploy Applications
+
+on:
+  push:
+    branches: [main, release]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'k8s/**'
+      - 'docker-compose.yml'
+      - 'Dockerfile*'
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'Target environment for deployment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - preprod
+        - prod
+      source_image_tag:
+        description: 'Source image tag (for prod promotion from preprod)'
+        required: false
+        default: 'latest-preprod'
+
+env:
+  AWS_REGION: us-west-2
+  SHARED_ECR_REGISTRY: SHARED_ACCOUNT_ID_PLACEHOLDER.dkr.ecr.us-west-2.amazonaws.com
+
+jobs:
+  build-and-push:
+    name: Build and Push Application Image
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'push') || 
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment != 'prod')
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      image_tag: ${{ steps.image-tag.outputs.tag }}
+      image_uri: ${{ steps.image-tag.outputs.uri }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials for shared account
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_SHARED_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-SharedAccount
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR (Shared Account)
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Get commit hash and set image tag
+      id: image-tag
+      run: |
+        COMMIT_HASH=${GITHUB_SHA::8}
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        
+        # Determine environment tag prefix based on branch and manual input
+        if [ "${{ github.event_name }}" == "push" ]; then
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            TAG_PREFIX="dev"
+          elif [ "${{ github.ref }}" == "refs/heads/release" ]; then
+            TAG_PREFIX="preprod"
+          else
+            TAG_PREFIX="dev"
+          fi
+        elif [ "${{ github.event.inputs.target_environment }}" == "preprod" ]; then
+          TAG_PREFIX="preprod"
+        else
+          TAG_PREFIX="dev"
+        fi
+        
+        TAG="${TAG_PREFIX}-${COMMIT_HASH}-${TIMESTAMP}"
+        
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        echo "uri=${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:${TAG}" >> $GITHUB_OUTPUT
+        
+        echo "🏷️ Building image with tag: ${TAG}"
+
+    - name: Build Docker image
+      run: |
+        cd backend
+        docker build -t ${{ steps.image-tag.outputs.uri }} .
+        
+        # Tag with latest based on source branch
+        if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.event.inputs.target_environment }}" == "dev" ]; then
+          docker tag ${{ steps.image-tag.outputs.uri }} ${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:latest-dev
+        elif [ "${{ github.ref }}" == "refs/heads/release" ] || [ "${{ github.event.inputs.target_environment }}" == "preprod" ]; then
+          docker tag ${{ steps.image-tag.outputs.uri }} ${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:latest-preprod
+        fi
+
+    - name: Push Docker image to ECR
+      run: |
+        docker push ${{ steps.image-tag.outputs.uri }}
+        
+        # Push latest tags based on source branch
+        if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.event.inputs.target_environment }}" == "dev" ]; then
+          docker push ${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:latest-dev
+          echo "✅ Pushed dev image: ${{ steps.image-tag.outputs.uri }}"
+        elif [ "${{ github.ref }}" == "refs/heads/release" ] || [ "${{ github.event.inputs.target_environment }}" == "preprod" ]; then
+          docker push ${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:latest-preprod
+          echo "✅ Pushed preprod image: ${{ steps.image-tag.outputs.uri }}"
+        fi
+
+  promote-for-production:
+    name: Promote Image for Production
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment == 'prod'
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      prod_image_tag: ${{ steps.promote.outputs.tag }}
+      prod_image_uri: ${{ steps.promote.outputs.uri }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials for shared account
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_SHARED_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-ProdPromotion
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR (Shared Account)
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Promote image to production
+      id: promote
+      run: |
+        # Source image
+        SOURCE_TAG="${{ github.event.inputs.source_image_tag }}"
+        SOURCE_IMAGE="${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:${SOURCE_TAG}"
+        
+        # Production tag
+        COMMIT_HASH=${GITHUB_SHA::8}
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        PROD_TAG="prod-${COMMIT_HASH}-${TIMESTAMP}"
+        PROD_IMAGE="${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:${PROD_TAG}"
+        
+        # Pull source and retag for production
+        docker pull ${SOURCE_IMAGE}
+        docker tag ${SOURCE_IMAGE} ${PROD_IMAGE}
+        docker tag ${SOURCE_IMAGE} ${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:latest-prod
+        
+        # Push production images
+        docker push ${PROD_IMAGE}
+        docker push ${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend:latest-prod
+        
+        echo "tag=${PROD_TAG}" >> $GITHUB_OUTPUT
+        echo "uri=${PROD_IMAGE}" >> $GITHUB_OUTPUT
+        
+        echo "✅ Promoted ${SOURCE_IMAGE} to ${PROD_IMAGE}"
+
+  deploy-dev:
+    name: Deploy to Dev Environment
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') || 
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment == 'dev')
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: dev
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials for Dev account
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_DEV_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-DevDeploy
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Install kubectl and Helm
+      run: |
+        curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+    - name: Configure kubectl for Dev
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name character-sheet-dev-eks
+
+    - name: Deploy Application to Dev
+      run: |
+        cd k8s
+        
+        # Get image details
+        IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+        IMAGE_URI="${{ needs.build-and-push.outputs.image_uri }}"
+        
+        echo "🚀 Deploying to Dev: ${IMAGE_URI}"
+        
+        # Configure External Secrets
+        AWS_REGION_VALUE="${{ env.AWS_REGION }}"
+        EXTERNAL_SECRETS_ROLE_ARN="arn:aws:iam::${{ secrets.DEV_ACCOUNT_ID }}:role/character-sheet-dev-external-secrets-role"
+        
+        sed -e "s/AWS_REGION_PLACEHOLDER/${AWS_REGION_VALUE}/g" \
+            -e "s|IAM_ROLE_ARN_PLACEHOLDER|${EXTERNAL_SECRETS_ROLE_ARN}|g" \
+            external-secrets.yaml > external-secrets-processed.yaml
+        
+        # Update image in deployment
+        sed -i "s|image: character-sheet-backend:.*|image: ${IMAGE_URI}|g" backend-deployment.yaml
+        
+        # Replace external secrets file
+        mv external-secrets.yaml external-secrets-original.yaml
+        mv external-secrets-processed.yaml external-secrets.yaml
+        
+        # Install External Secrets Operator if needed
+        if ! helm list -n external-secrets-system | grep -q external-secrets; then
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo update
+          helm install external-secrets external-secrets/external-secrets \
+            -n external-secrets-system \
+            --create-namespace \
+            -f external-secrets-operator-values.yaml
+        fi
+        
+        # Deploy to Kubernetes
+        kubectl apply -k .
+        
+        # Restore original file
+        mv external-secrets-original.yaml external-secrets.yaml
+
+    - name: Wait for Dev deployment
+      run: |
+        echo "Waiting for deployments to be ready..."
+        kubectl wait --for=condition=available --timeout=600s deployment/backend-deployment -n character-sheet
+        kubectl wait --for=condition=available --timeout=600s deployment/postgres-deployment -n character-sheet
+        
+        echo "✅ Dev deployment completed successfully"
+
+  deploy-preprod:
+    name: Deploy to PreProd Environment
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/release') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment == 'preprod')
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: preprod
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials for PreProd account
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_PREPROD_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-PreProdDeploy
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Install kubectl and Helm
+      run: |
+        curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+    - name: Configure kubectl for PreProd
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name character-sheet-preprod-eks
+
+    - name: Deploy Application to PreProd
+      run: |
+        cd k8s
+        
+        # Get image details (already tagged as preprod from build step)
+        IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+        IMAGE_URI="${{ needs.build-and-push.outputs.image_uri }}"
+        
+        echo "🚀 Deploying to PreProd: ${IMAGE_URI}"
+        
+        # Configure External Secrets
+        AWS_REGION_VALUE="${{ env.AWS_REGION }}"
+        EXTERNAL_SECRETS_ROLE_ARN="arn:aws:iam::${{ secrets.PREPROD_ACCOUNT_ID }}:role/character-sheet-preprod-external-secrets-role"
+        
+        sed -e "s/AWS_REGION_PLACEHOLDER/${AWS_REGION_VALUE}/g" \
+            -e "s|IAM_ROLE_ARN_PLACEHOLDER|${EXTERNAL_SECRETS_ROLE_ARN}|g" \
+            external-secrets.yaml > external-secrets-processed.yaml
+        
+        # Update image in deployment
+        sed -i "s|image: character-sheet-backend:.*|image: ${IMAGE_URI}|g" backend-deployment.yaml
+        
+        # Replace external secrets file
+        mv external-secrets.yaml external-secrets-original.yaml
+        mv external-secrets-processed.yaml external-secrets.yaml
+        
+        # Install External Secrets Operator if needed
+        if ! helm list -n external-secrets-system | grep -q external-secrets; then
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo update
+          helm install external-secrets external-secrets/external-secrets \
+            -n external-secrets-system \
+            --create-namespace \
+            -f external-secrets-operator-values.yaml
+        fi
+        
+        # Deploy to Kubernetes
+        kubectl apply -k .
+        
+        # Restore original file
+        mv external-secrets-original.yaml external-secrets.yaml
+
+    - name: Wait for PreProd deployment
+      run: |
+        echo "Waiting for deployments to be ready..."
+        kubectl wait --for=condition=available --timeout=600s deployment/backend-deployment -n character-sheet
+        kubectl wait --for=condition=available --timeout=600s deployment/postgres-deployment -n character-sheet
+        
+        echo "✅ PreProd deployment completed successfully"
+
+  deploy-production:
+    name: Deploy to Production Environment
+    runs-on: ubuntu-latest
+    needs: [promote-for-production]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment == 'prod'
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: 
+      name: production
+      url: https://production.character-sheet.com
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials for Production account
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_PROD_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-ProdDeploy
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Install kubectl and Helm
+      run: |
+        curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+    - name: Configure kubectl for Production
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name character-sheet-prod-eks
+
+    - name: Verify cluster access and status
+      run: |
+        echo "=== Production Cluster Information ==="
+        kubectl get nodes
+        kubectl get namespaces
+        kubectl get pods --all-namespaces
+
+    - name: Deploy Application to Production
+      run: |
+        cd k8s
+        
+        # Get promoted image
+        PROD_IMAGE="${{ needs.promote-for-production.outputs.prod_image_uri }}"
+        
+        echo "🚀 Deploying to Production: ${PROD_IMAGE}"
+        
+        # Configure External Secrets
+        AWS_REGION_VALUE="${{ env.AWS_REGION }}"
+        EXTERNAL_SECRETS_ROLE_ARN="arn:aws:iam::${{ secrets.PROD_ACCOUNT_ID }}:role/character-sheet-prod-external-secrets-role"
+        
+        sed -e "s/AWS_REGION_PLACEHOLDER/${AWS_REGION_VALUE}/g" \
+            -e "s|IAM_ROLE_ARN_PLACEHOLDER|${EXTERNAL_SECRETS_ROLE_ARN}|g" \
+            external-secrets.yaml > external-secrets-processed.yaml
+        
+        # Update image in deployment
+        sed -i "s|image: character-sheet-backend:.*|image: ${PROD_IMAGE}|g" backend-deployment.yaml
+        
+        # Replace external secrets file
+        mv external-secrets.yaml external-secrets-original.yaml
+        mv external-secrets-processed.yaml external-secrets.yaml
+        
+        # Install External Secrets Operator if needed
+        if ! helm list -n external-secrets-system | grep -q external-secrets; then
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo update
+          helm install external-secrets external-secrets/external-secrets \
+            -n external-secrets-system \
+            --create-namespace \
+            -f external-secrets-operator-values.yaml
+        fi
+        
+        # Deploy to Kubernetes
+        kubectl apply -k .
+        
+        # Restore original file
+        mv external-secrets-original.yaml external-secrets.yaml
+
+    - name: Wait for Production deployment with enhanced health checks
+      run: |
+        echo "Waiting for External Secrets to sync..."
+        kubectl wait --for=condition=Ready externalsecret/postgres-external-secret -n character-sheet --timeout=300s
+        kubectl wait --for=condition=Ready externalsecret/backend-external-secret -n character-sheet --timeout=300s
+        
+        echo "Waiting for deployments to be ready..."
+        kubectl rollout status deployment/postgres-deployment -n character-sheet --timeout=600s
+        kubectl rollout status deployment/backend-deployment -n character-sheet --timeout=600s
+        
+        echo "✅ Production deployment completed successfully"
+
+    - name: Production health check and verification
+      run: |
+        echo "=== Production Deployment Verification ==="
+        
+        # Get application URL
+        ALB_DNS=$(kubectl get ingress character-sheet-ingress -n character-sheet -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        
+        if [ -n "$ALB_DNS" ]; then
+          echo "🌐 Application URL: https://${ALB_DNS}"
+          echo "🔍 Health Check URL: https://${ALB_DNS}/health"
+          
+          # Wait for ALB to be ready and test health endpoint
+          echo "Testing application health..."
+          sleep 120  # Give ALB time for initial setup
+          
+          for i in {1..20}; do
+            if curl -f -s "https://${ALB_DNS}/health" > /dev/null; then
+              echo "✅ Production application health check passed!"
+              break
+            else
+              echo "⏳ Health check attempt $i failed, retrying in 30 seconds..."
+              sleep 30
+            fi
+          done
+        else
+          echo "⚠️ ALB DNS not available yet, manual verification required"
+        fi
+        
+        echo "=== Production Deployment Summary ==="
+        kubectl get all -n character-sheet
+
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-dev, deploy-preprod, deploy-production, promote-for-production]
+    if: always()
+    
+    steps:
+    - name: Generate deployment summary
+      run: |
+        echo "## 🚀 Application Deployment Summary"
+        echo "**Trigger:** ${{ github.event_name }}"
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          echo "**Target Environment:** ${{ github.event.inputs.target_environment }}"
+        elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+          echo "**Branch:** main → Dev Environment"
+        elif [ "${{ github.ref }}" == "refs/heads/release" ]; then
+          echo "**Branch:** release → PreProd Environment"
+        fi
+        echo "**Triggered by:** ${{ github.actor }}"
+        echo "**Timestamp:** $(date -u)"
+        
+        echo ""
+        echo "### Deployment Flow:"
+        echo "- **main branch** → Dev Environment (automatic)"
+        echo "- **release branch** → PreProd Environment (automatic)"
+        echo "- **Manual workflow** → Production Environment"
+        
+        echo ""
+        echo "### Deployment Results:"
+        
+        # Dev results
+        if [ "${{ needs.deploy-dev.result }}" == "success" ]; then
+          echo "- ✅ **Dev**: Deployment successful"
+        elif [ "${{ needs.deploy-dev.result }}" == "failure" ]; then
+          echo "- ❌ **Dev**: Deployment failed"
+        else
+          echo "- ⏭️ **Dev**: Deployment skipped"
+        fi
+        
+        # PreProd results
+        if [ "${{ needs.deploy-preprod.result }}" == "success" ]; then
+          echo "- ✅ **PreProd**: Deployment successful"
+        elif [ "${{ needs.deploy-preprod.result }}" == "failure" ]; then
+          echo "- ❌ **PreProd**: Deployment failed"
+        else
+          echo "- ⏭️ **PreProd**: Deployment skipped"
+        fi
+        
+        # Production results
+        if [ "${{ needs.deploy-production.result }}" == "success" ]; then
+          echo "- ✅ **Production**: Deployment successful"
+        elif [ "${{ needs.deploy-production.result }}" == "failure" ]; then
+          echo "- ❌ **Production**: Deployment failed"
+        else
+          echo "- ⏭️ **Production**: Deployment skipped"
+        fi
+        
+        echo ""
+        echo "### Image Information:"
+        if [ -n "${{ needs.build-and-push.outputs.image_tag }}" ]; then
+          echo "- **Built Image**: ${{ needs.build-and-push.outputs.image_uri }}"
+        fi
+        if [ -n "${{ needs.promote-for-production.outputs.prod_image_tag }}" ]; then
+          echo "- **Production Image**: ${{ needs.promote-for-production.outputs.prod_image_uri }}"
+        fi
+        
+        echo ""
+        echo "### Next Steps:"
+        if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+          echo "- Code deployed to **Dev** environment"
+          echo "- To deploy to PreProd: Merge main → release branch"
+        elif [ "${{ github.ref }}" == "refs/heads/release" ]; then
+          echo "- Code deployed to **PreProd** environment"
+          echo "- To deploy to Production: Use manual workflow with latest-preprod image"
+        fi 

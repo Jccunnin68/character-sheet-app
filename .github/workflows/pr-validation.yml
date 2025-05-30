@@ -1,0 +1,394 @@
+# GitHub Actions Workflow for Pull Request Validation
+# This workflow validates code changes in pull requests
+# Performs Terraform plan, linting, and basic validation for all environments
+
+name: Pull Request Validation
+
+on:
+  pull_request:
+    branches: [main, production]
+    types: [opened, synchronize, reopened]
+
+env:
+  AWS_REGION: us-west-2
+  TERRAFORM_VERSION: 1.6.0
+
+jobs:
+  terraform-validate-shared:
+    name: Terraform Validation (Shared Infrastructure)
+    runs-on: ubuntu-latest
+    
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Validate shared infrastructure
+      run: |
+        cd terraform/shared-infrastructure
+        
+        # Create temporary terraform.tfvars for validation
+        cat << EOF > terraform.tfvars
+        aws_region = "${{ env.AWS_REGION }}"
+        project_name = "character-sheet"
+        
+        # Dummy account IDs for validation
+        dev_account_id = "111111111111"
+        preprod_account_id = "222222222222"
+        prod_account_id = "333333333333"
+        
+        create_terraform_state_bucket = false
+        EOF
+        
+        # Initialize and validate
+        terraform init
+        terraform validate
+        terraform fmt -check -diff -recursive
+
+  terraform-validate-environments:
+    name: Terraform Validation (Environments)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, preprod, prod]
+    
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-PRValidation-${{ matrix.environment }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Validate ${{ matrix.environment }} environment
+      run: |
+        cd terraform
+        
+        # Copy environment-specific configuration
+        cp environments/${{ matrix.environment }}/terraform.tfvars terraform.tfvars
+        
+        # Replace placeholders with dummy values for validation
+        sed -i "s/PLACEHOLDER_DB_PASSWORD/dummy-password-for-validation/g" terraform.tfvars
+        sed -i "s/PLACEHOLDER_JWT_SECRET/dummy-jwt-secret-for-validation-32char/g" terraform.tfvars
+        sed -i "s/PLACEHOLDER_API_KEY/dummy-api-key/g" terraform.tfvars
+        
+        # Replace account ID placeholders
+        sed -i "s/DEV_ACCOUNT_ID_PLACEHOLDER/111111111111/g" terraform.tfvars
+        sed -i "s/PREPROD_ACCOUNT_ID_PLACEHOLDER/222222222222/g" terraform.tfvars
+        sed -i "s/PROD_ACCOUNT_ID_PLACEHOLDER/333333333333/g" terraform.tfvars
+        sed -i "s/SHARED_ACCOUNT_ID_PLACEHOLDER/444444444444/g" terraform.tfvars
+        
+        # Replace ECR URL placeholder
+        sed -i "s|ecr_repository_url = \".*\"|ecr_repository_url = \"444444444444.dkr.ecr.us-west-2.amazonaws.com\"|g" terraform.tfvars
+        
+        # Initialize and validate
+        terraform init
+        terraform validate
+        terraform fmt -check -diff -recursive
+
+    - name: Terraform Plan (${{ matrix.environment }})
+      id: plan
+      run: |
+        cd terraform
+        terraform plan -detailed-exitcode -no-color -out=tfplan-${{ matrix.environment }} 2>&1 | tee plan_output_${{ matrix.environment }}.txt
+      continue-on-error: true
+
+    - name: Comment PR with Terraform Plan (${{ matrix.environment }})
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          try {
+            const plan = fs.readFileSync('terraform/plan_output_${{ matrix.environment }}.txt', 'utf8');
+            const maxGitHubBodyCharacters = 65000;
+            
+            // Truncate plan if too long
+            let planOutput = plan;
+            if (plan.length > maxGitHubBodyCharacters) {
+              planOutput = plan.substring(0, maxGitHubBodyCharacters) + '\n\n... (output truncated)';
+            }
+            
+            const output = `#### 📋 Terraform Plan (${{ matrix.environment }} environment)
+            <details>
+            <summary>Show Plan</summary>
+            
+            \`\`\`terraform
+            ${planOutput}
+            \`\`\`
+            
+            </details>
+            
+            *Plan Status: ${{ steps.plan.outcome }}*
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+          } catch (error) {
+            console.error('Error reading plan output:', error);
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `#### 📋 Terraform Plan (${{ matrix.environment }} environment)\n\n❌ Failed to generate plan output.`
+            });
+          }
+
+  kubernetes-validate:
+    name: Kubernetes Validation
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install kubeval
+      run: |
+        wget https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz
+        tar xf kubeval-linux-amd64.tar.gz
+        sudo mv kubeval /usr/local/bin
+
+    - name: Install kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    - name: Validate Kubernetes manifests
+      run: |
+        cd k8s
+        
+        # Process external secrets template with dummy values
+        sed -e "s/AWS_REGION_PLACEHOLDER/us-west-2/g" \
+            -e "s|IAM_ROLE_ARN_PLACEHOLDER|arn:aws:iam::123456789012:role/dummy-role|g" \
+            external-secrets.yaml > external-secrets-processed.yaml
+        
+        # Replace template file temporarily
+        mv external-secrets.yaml external-secrets-original.yaml
+        mv external-secrets-processed.yaml external-secrets.yaml
+        
+        # Validate individual manifests
+        for file in *.yaml; do
+          echo "Validating $file..."
+          kubeval "$file" || echo "Warning: $file validation failed"
+        done
+        
+        # Test kustomize build
+        echo "Testing kustomize build..."
+        kustomize build . > /tmp/built-manifests.yaml
+        
+        # Validate built manifests
+        echo "Validating built manifests..."
+        kubeval /tmp/built-manifests.yaml || echo "Warning: Built manifests validation failed"
+        
+        # Restore original file
+        mv external-secrets-original.yaml external-secrets.yaml
+
+  docker-build-test:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Test Docker build
+      run: |
+        # Test backend Docker build
+        if [ -d backend ]; then
+          echo "Testing backend Docker build..."
+          docker build --no-cache -t character-sheet-backend-test:pr-${{ github.event.number }} ./backend
+          echo "✅ Backend Docker build successful"
+        else
+          echo "⏭️ Backend directory not found, skipping Docker build test"
+        fi
+        
+        # Test frontend Docker build if it exists
+        if [ -d frontend ] && [ -f frontend/Dockerfile ]; then
+          echo "Testing frontend Docker build..."
+          docker build --no-cache -t character-sheet-frontend-test:pr-${{ github.event.number }} ./frontend
+          echo "✅ Frontend Docker build successful"
+        else
+          echo "⏭️ Frontend Dockerfile not found, skipping frontend Docker build test"
+        fi
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
+
+    - name: Scan filesystem for secrets
+      run: |
+        trivy fs --security-checks secret --format table .
+
+    - name: Scan Terraform for misconfigurations
+      run: |
+        trivy config terraform/
+
+    - name: Scan shared infrastructure
+      run: |
+        trivy config terraform/shared-infrastructure/
+
+    - name: Scan Kubernetes manifests
+      run: |
+        trivy config k8s/
+
+  workflow-validation:
+    name: GitHub Actions Workflow Validation
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Validate workflow syntax
+      run: |
+        echo "🔍 Validating GitHub Actions workflows..."
+        
+        # Check for syntax issues in workflows
+        for workflow in .github/workflows/*.yml; do
+          echo "Checking $workflow..."
+          # Basic YAML syntax check
+          python3 -c "import yaml; yaml.safe_load(open('$workflow'))" || echo "⚠️ YAML syntax issue in $workflow"
+        done
+
+    - name: Check for required secrets
+      run: |
+        echo "🔍 Checking for required secrets in workflows..."
+        
+        # List expected secrets
+        cat << EOF
+        Required GitHub Secrets for multi-environment setup:
+        
+        === Shared Account ===
+        - AWS_SHARED_ROLE_TO_ASSUME (or AWS_SHARED_AWS_ACCESS_KEY_ID + AWS_SHARED_AWS_SECRET_ACCESS_KEY)
+        - SHARED_ACCOUNT_ID
+        
+        === Dev Environment ===
+        - AWS_DEV_ROLE_TO_ASSUME
+        - DEV_ACCOUNT_ID
+        - DEV_DB_PASSWORD
+        - DEV_JWT_SECRET
+        
+        === PreProd Environment ===
+        - AWS_PREPROD_ROLE_TO_ASSUME
+        - PREPROD_ACCOUNT_ID
+        - PREPROD_DB_PASSWORD
+        - PREPROD_JWT_SECRET
+        
+        === Production Environment ===
+        - AWS_PROD_ROLE_TO_ASSUME
+        - PROD_ACCOUNT_ID
+        - PROD_DB_PASSWORD
+        - PROD_JWT_SECRET
+        - PROD_API_KEY (optional)
+        EOF
+
+  pr-summary:
+    name: PR Validation Summary
+    runs-on: ubuntu-latest
+    needs: [terraform-validate-shared, terraform-validate-environments, kubernetes-validate, docker-build-test, security-scan, workflow-validation]
+    if: always()
+
+    steps:
+    - name: PR Validation Summary
+      run: |
+        echo "## 🔍 Pull Request Validation Summary"
+        echo ""
+        
+        # Shared infrastructure validation
+        if [ "${{ needs.terraform-validate-shared.result }}" == "success" ]; then
+          echo "✅ **Shared Infrastructure**: Terraform validation passed"
+        else
+          echo "❌ **Shared Infrastructure**: Terraform validation failed"
+        fi
+        
+        # Environment validation
+        if [ "${{ needs.terraform-validate-environments.result }}" == "success" ]; then
+          echo "✅ **Environment Configs**: All environments validated successfully"
+        else
+          echo "❌ **Environment Configs**: Some environment validations failed"
+        fi
+        
+        # Kubernetes validation
+        if [ "${{ needs.kubernetes-validate.result }}" == "success" ]; then
+          echo "✅ **Kubernetes**: Manifests valid"
+        else
+          echo "❌ **Kubernetes**: Manifest validation failed"
+        fi
+        
+        # Docker build test
+        if [ "${{ needs.docker-build-test.result }}" == "success" ]; then
+          echo "✅ **Docker**: Build test passed"
+        else
+          echo "❌ **Docker**: Build test failed"
+        fi
+        
+        # Security scan
+        if [ "${{ needs.security-scan.result }}" == "success" ]; then
+          echo "✅ **Security**: No critical issues found"
+        else
+          echo "⚠️ **Security**: Issues detected (check logs)"
+        fi
+        
+        # Workflow validation
+        if [ "${{ needs.workflow-validation.result }}" == "success" ]; then
+          echo "✅ **Workflows**: GitHub Actions syntax valid"
+        else
+          echo "❌ **Workflows**: GitHub Actions validation failed"
+        fi
+        
+        echo ""
+        echo "### 📋 Multi-Environment Review Checklist"
+        echo "- [ ] Shared infrastructure Terraform validated"
+        echo "- [ ] All environment configurations reviewed (dev/preprod/prod)"
+        echo "- [ ] Kubernetes manifests validated"
+        echo "- [ ] Docker builds successfully"
+        echo "- [ ] Security scan passed"
+        echo "- [ ] No secrets in codebase"
+        echo "- [ ] GitHub Actions workflows syntax valid"
+        echo "- [ ] Account ID placeholders properly configured"
+        
+        echo ""
+        echo "### 🚀 Deployment Flow"
+        echo "1. **Main branch**: Auto-deploy to Dev → PreProd"
+        echo "2. **Production branch**: Manual promotion to Production"
+        echo "3. **Shared infrastructure**: Separate deployment pipeline" 

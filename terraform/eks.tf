@@ -18,42 +18,73 @@ resource "aws_eks_cluster" "main" {
     # Geo-restriction: Only allow access from US, Canada, and Europe IP ranges
     # These CIDR blocks cover major IP ranges for these regions
     public_access_cidrs = [
-      # United States IP ranges (major blocks)
-      "3.0.0.0/8",       # Amazon/AWS US
-      "4.0.0.0/6",       # Level 3 Communications US
-      "8.0.0.0/7",       # Level 3 Communications US
-      "12.0.0.0/6",      # AT&T US
-      "16.0.0.0/4",      # Hewlett-Packard US
-      "24.0.0.0/5",      # Comcast US
-      "32.0.0.0/3",      # Major US ISPs
-      "64.0.0.0/2",      # Major US ISPs
-      "128.0.0.0/2",     # Major US ISPs
-      "192.0.0.0/2",     # Major US ISPs
+      # US IP ranges (major cloud providers and ISPs)
+      "3.0.0.0/8",        # Amazon/AWS
+      "4.0.0.0/8",        # Level 3 Communications
+      "8.0.0.0/8",        # Level 3 Communications  
+      "12.0.0.0/8",       # AT&T
+      "24.0.0.0/8",       # Comcast
+      "50.0.0.0/8",       # Comcast
+      "63.0.0.0/8",       # Cogent
+      "64.0.0.0/10",      # Various US providers
+      "66.0.0.0/8",       # Sprint, Verizon
+      "67.0.0.0/8",       # Comcast
+      "68.0.0.0/8",       # Comcast, AT&T
+      "69.0.0.0/8",       # Comcast, Road Runner
+      "70.0.0.0/8",       # Comcast
+      "71.0.0.0/8",       # Comcast
+      "72.0.0.0/8",       # Comcast, Road Runner
+      "73.0.0.0/8",       # Comcast, Verizon
+      "74.0.0.0/8",       # Verizon, Optimum
+      "75.0.0.0/8",       # Comcast, Verizon
+      "76.0.0.0/8",       # Comcast
+      "96.0.0.0/8",       # Comcast
+      "98.0.0.0/8",       # Comcast
+      "99.0.0.0/8",       # Comcast
+      "173.0.0.0/8",      # Comcast, various
+      "174.0.0.0/8",      # Cogent
+      "184.0.0.0/8",      # Comcast, various
+      "208.0.0.0/8",      # Various US ISPs
       
-      # Canada IP ranges
-      "142.0.0.0/8",     # Canadian ISPs
-      "206.0.0.0/7",     # Canadian ISPs
-      "208.0.0.0/4",     # North American ISPs (includes Canada)
+      # Canadian IP ranges
+      "142.0.0.0/8",      # Canadian ISPs
+      "206.0.0.0/8",      # Bell Canada, Rogers
+      "209.0.0.0/8",      # Various Canadian ISPs
       
-      # Europe IP ranges (major blocks)
-      "2.0.0.0/8",       # European ISPs
-      "5.0.0.0/8",       # European ISPs
-      "31.0.0.0/8",      # European ISPs
-      "37.0.0.0/8",      # European ISPs
-      "46.0.0.0/8",      # European ISPs
-      "62.0.0.0/8",      # European ISPs
-      "77.0.0.0/8",      # European ISPs
-      "78.0.0.0/7",      # European ISPs
-      "80.0.0.0/4",      # European ISPs
-      "109.0.0.0/8",     # European ISPs
-      "151.0.0.0/8",     # European ISPs
-      "176.0.0.0/4",     # European ISPs
-      "193.0.0.0/8",     # European ISPs
-      "194.0.0.0/7",     # European ISPs
-      "213.0.0.0/8",     # European ISPs
+      # European IP ranges (major blocks)
+      "2.0.0.0/8",        # European ISPs
+      "5.0.0.0/8",        # European providers
+      "31.0.0.0/8",       # European ISPs
+      "37.0.0.0/8",       # European providers
+      "46.0.0.0/8",       # European ISPs
+      "62.0.0.0/8",       # European providers
+      "77.0.0.0/8",       # European ISPs
+      "78.0.0.0/8",       # European providers
+      "79.0.0.0/8",       # European ISPs
+      "80.0.0.0/8",       # European providers
+      "81.0.0.0/8",       # European ISPs
+      "82.0.0.0/8",       # European providers
+      "83.0.0.0/8",       # European ISPs
+      "84.0.0.0/8",       # European providers
+      "85.0.0.0/8",       # European ISPs
+      "86.0.0.0/8",       # European providers
+      "87.0.0.0/8",       # European ISPs
+      "88.0.0.0/8",       # European providers
+      "89.0.0.0/8",       # European ISPs
+      "90.0.0.0/8",       # European providers
+      "91.0.0.0/8",       # European ISPs
+      "92.0.0.0/8",       # European providers
+      "93.0.0.0/8",       # European ISPs
+      "94.0.0.0/8",       # European providers
+      "95.0.0.0/8",       # European ISPs
+      "151.0.0.0/8",      # European providers
+      "176.0.0.0/8",      # European ISPs
+      "178.0.0.0/8",      # European providers
+      "188.0.0.0/8",      # European ISPs
+      "193.0.0.0/8",      # European academic/research
+      "194.0.0.0/8",      # European academic/research
+      "195.0.0.0/8",      # European academic/research
     ]
-    
-    security_group_ids = [aws_security_group.eks_cluster.id]
   }
 
   # Enable EKS logging for monitoring and debugging
@@ -71,7 +102,7 @@ resource "aws_eks_cluster" "main" {
 }
 
 # EKS Node Group
-# Managed worker nodes that will run the actual application pods
+# This manages the EC2 instances that will run the Kubernetes pods
 resource "aws_eks_node_group" "main" {
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = "${var.project_name}-${var.environment}-nodes"
@@ -81,11 +112,11 @@ resource "aws_eks_node_group" "main" {
   # In production, you might want to use private subnets with NAT gateways
   subnet_ids = var.enable_nat_gateway ? aws_subnet.private[*].id : aws_subnet.public[*].id
 
-  # Node scaling configuration
+  # Node scaling configuration - now using variables
   scaling_config {
-    desired_size = 2  # Number of nodes to maintain
-    max_size     = 4  # Maximum nodes during scaling
-    min_size     = 1  # Minimum nodes (cost optimization)
+    desired_size = var.node_desired_size
+    max_size     = var.node_max_size
+    min_size     = var.node_min_size
   }
 
   # Update configuration for rolling updates
@@ -93,16 +124,19 @@ resource "aws_eks_node_group" "main" {
     max_unavailable = 1  # Allow one node to be unavailable during updates
   }
 
-  # EC2 instance configuration
-  instance_types = ["t3.small"]  # Cost-effective instance type
+  # EC2 instance configuration - now using variables
+  instance_types = var.node_instance_types
   ami_type       = "AL2_x86_64"  # Amazon Linux 2 AMI
   capacity_type  = "ON_DEMAND"   # Use On-Demand instances (can switch to SPOT for cost savings)
   disk_size      = 20            # EBS volume size in GB
 
   # Remote access configuration (optional - for debugging)
-  remote_access {
-    ec2_ssh_key = var.ssh_key_name  # SSH key for node access (create via AWS console)
-    source_security_group_ids = [aws_security_group.eks_nodes.id]
+  dynamic "remote_access" {
+    for_each = var.ssh_key_name != null ? [1] : []
+    content {
+      ec2_ssh_key = var.ssh_key_name
+      source_security_group_ids = [aws_security_group.eks_nodes.id]
+    }
   }
 
   # Ensure proper order of resource creation
@@ -195,92 +229,78 @@ resource "aws_iam_role_policy_attachment" "eks_node_group_AmazonEC2ContainerRegi
   role       = aws_iam_role.eks_node_group.name
 }
 
-# Security Group for EKS Cluster
-# Controls network access to the EKS API server
-resource "aws_security_group" "eks_cluster" {
-  name_prefix = "${var.project_name}-${var.environment}-eks-cluster-"
-  vpc_id      = aws_vpc.main.id
+# Cross-account ECR access policy for nodes
+# This allows EKS nodes to pull images from the shared ECR repository
+resource "aws_iam_role_policy" "eks_cross_account_ecr" {
+  name = "${var.project_name}-${var.environment}-cross-account-ecr"
+  role = aws_iam_role.eks_node_group.id
 
-  # Allow HTTPS traffic from nodes to cluster API
-  ingress {
-    description = "Node to cluster API"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    security_groups = [aws_security_group.eks_nodes.id]
-  }
-
-  # Allow all outbound traffic
-  egress {
-    description = "All outbound traffic"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-eks-cluster-sg"
-    Environment = var.environment
-  }
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage"
+        ]
+        Resource = "arn:aws:ecr:${var.aws_region}:${var.shared_account_id}:repository/character-sheet-backend"
+      }
+    ]
+  })
 }
 
 # Security Group for EKS Nodes
-# Controls network access to worker nodes
+# Controls traffic to/from worker nodes
 resource "aws_security_group" "eks_nodes" {
-  name_prefix = "${var.project_name}-${var.environment}-eks-nodes-"
+  name_prefix = "${var.project_name}-${var.environment}-eks-nodes"
   vpc_id      = aws_vpc.main.id
 
   # Allow nodes to communicate with each other
   ingress {
-    description = "Node to node communication"
-    from_port   = 0
-    to_port     = 65535
-    protocol    = "tcp"
-    self        = true
+    from_port = 0
+    to_port   = 65535
+    protocol  = "tcp"
+    self      = true
   }
 
-  # Allow pods to communicate with cluster API
+  # Allow pods to communicate with the cluster API Server
   ingress {
-    description = "Cluster API to node communication"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+  }
+
+  # Allow nodes to receive communication from managed node groups
+  ingress {
     from_port   = 1025
     to_port     = 65535
     protocol    = "tcp"
-    security_groups = [aws_security_group.eks_cluster.id]
+    cidr_blocks = [aws_vpc.main.cidr_block]
   }
 
-  # Allow Application Load Balancer to reach services
-  ingress {
-    description = "ALB to nodes"
-    from_port   = 0
-    to_port     = 65535
-    protocol    = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-
-  # SSH access for debugging (restricted to geo-locations)
-  ingress {
-    description = "SSH access from allowed regions"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    # Use same geo-restricted CIDR blocks as EKS API access
-    cidr_blocks = [
-      # United States
-      "3.0.0.0/8", "4.0.0.0/6", "8.0.0.0/7", "12.0.0.0/6", "16.0.0.0/4",
-      "24.0.0.0/5", "32.0.0.0/3", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2",
-      # Canada
-      "142.0.0.0/8", "206.0.0.0/7", "208.0.0.0/4",
-      # Europe
-      "2.0.0.0/8", "5.0.0.0/8", "31.0.0.0/8", "37.0.0.0/8", "46.0.0.0/8",
-      "62.0.0.0/8", "77.0.0.0/8", "78.0.0.0/7", "80.0.0.0/4", "109.0.0.0/8",
-      "151.0.0.0/8", "176.0.0.0/4", "193.0.0.0/8", "194.0.0.0/7", "213.0.0.0/8"
-    ]
+  # SSH access (if key is provided)
+  dynamic "ingress" {
+    for_each = var.ssh_key_name != null ? [1] : []
+    content {
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]  # Restrict this in production
+    }
   }
 
   # Allow all outbound traffic
   egress {
-    description = "All outbound traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"

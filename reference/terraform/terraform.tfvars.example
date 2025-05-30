@@ -1,0 +1,73 @@
+# Terraform Variables Example for ECS Reference Implementation
+# =============================================================
+# Copy this file to terraform.tfvars and update with your values
+
+# Basic Configuration
+aws_region   = "us-west-2"
+project_name = "character-sheet"
+environment  = "prod"
+
+# Networking Configuration
+vpc_cidr           = "10.0.0.0/16"
+availability_zones = ["us-west-2a", "us-west-2b"]
+
+# Cost Optimization (IMPORTANT for Free Tier)
+enable_nat_gateway = false  # Set to true if you need true private subnets ($32/month cost)
+
+# Application Configuration
+container_port      = 8080
+health_check_path   = "/health"
+app_count          = 1  # Keep at 1 for Free Tier
+
+# Database Configuration (REQUIRED)
+db_name             = "charactersheet"
+db_username         = "postgres"
+db_password         = "your-secure-password-change-this"  # CHANGE THIS!
+db_instance_class   = "db.t3.micro"  # Free Tier eligible
+db_allocated_storage = 20  # Max for Free Tier
+
+# Security Configuration (REQUIRED)
+jwt_secret = "your-32-character-jwt-secret-key"  # CHANGE THIS! Must be 32+ chars
+
+# Optional Configuration
+ssh_key_name = ""  # EC2 key pair name for SSH access (optional)
+
+# ECS Configuration
+instance_type      = "t3.micro"  # Free Tier eligible
+min_capacity       = 1
+max_capacity       = 1
+desired_capacity   = 1
+
+# Logging
+log_retention_days = 3  # Minimal for Free Tier
+
+# Frontend Configuration
+enable_cloudfront        = true
+cloudfront_price_class   = "PriceClass_100"  # US/Europe only
+
+# Tags
+common_tags = {
+  Terraform   = "true"
+  Project     = "character-sheet"
+  Environment = "prod"
+  Owner       = "DevOps"
+  CostCenter  = "Engineering"
+}
+
+# Free Tier Configuration
+# - EC2 Instances: 750 hours t3.micro per month (1 instance = 24/7 coverage)
+# - RDS: 750 hours db.t3.micro with 20GB storage per month
+# - S3: 5GB storage, 20,000 GET requests, 2,000 PUT requests
+# - CloudFront: 1TB data transfer out, 10,000,000 HTTP/HTTPS requests
+# - CloudWatch Logs: 5GB ingestion, 5GB storage
+# - VPC: 750 hours of NAT Gateway (only if enable_nat_gateway = true)
+
+# Estimated Monthly Cost:
+# - With NAT Gateway (enable_nat_gateway = true): $35-50
+# - Free Tier Optimized (enable_nat_gateway = false): $0-5
+
+# Architecture:
+# - Uses ECS on EC2 (t3.micro) instead of Fargate for better Free Tier utilization
+# - Single EC2 instance runs containerized applications
+# - Bridge networking with dynamic port mapping
+# - Auto Scaling Group maintains single instance (self-healing) 

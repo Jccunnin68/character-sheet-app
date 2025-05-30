@@ -8,12 +8,6 @@ resource "aws_s3_bucket" "frontend" {
   }
 }
 
-resource "random_string" "bucket_suffix" {
-  length  = 8
-  special = false
-  upper   = false
-}
-
 resource "aws_s3_bucket_public_access_block" "frontend" {
   bucket = aws_s3_bucket.frontend.id
 
@@ -48,6 +42,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "frontend" {
   rule {
     id     = "cleanup_old_files"
     status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
 
     expiration {
       days = 30 # Auto-delete files older than 30 days to stay within Free Tier

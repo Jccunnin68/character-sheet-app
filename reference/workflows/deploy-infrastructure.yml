@@ -1,0 +1,386 @@
+# GitHub Actions Workflow for Full Infrastructure Deployment
+# This workflow deploys the complete infrastructure using Terraform and sets up the application
+# Use this for initial deployment or when infrastructure changes are made
+
+name: Deploy Full Infrastructure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/deploy-infrastructure.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+      terraform_action:
+        description: 'Terraform action to perform'
+        required: true
+        default: 'apply'
+        type: choice
+        options:
+        - plan
+        - apply
+        - destroy
+      skip_application_deploy:
+        description: 'Skip application deployment (Terraform only)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_REGION: us-west-2
+  TERRAFORM_VERSION: 1.6.0
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'prod' }}
+
+jobs:
+  terraform:
+    name: Terraform Infrastructure
+    runs-on: ubuntu-latest
+    
+    permissions:
+      id-token: write   # Required for OIDC
+      contents: read    # Required to checkout code
+      pull-requests: write  # Required for PR comments
+
+    outputs:
+      cluster_name: ${{ steps.tf-output.outputs.cluster_name }}
+      ecr_registry: ${{ steps.tf-output.outputs.ecr_registry }}
+      external_secrets_role_arn: ${{ steps.tf-output.outputs.external_secrets_role_arn }}
+      aws_region: ${{ steps.tf-output.outputs.aws_region }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-Terraform
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+        terraform_wrapper: false
+
+    - name: Check if terraform.tfvars exists
+      id: check-tfvars
+      run: |
+        if [ -f terraform/terraform.tfvars ]; then
+          echo "tfvars_exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "tfvars_exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create terraform.tfvars from secrets
+      if: steps.check-tfvars.outputs.tfvars_exists == 'false'
+      run: |
+        cd terraform
+        cat << EOF > terraform.tfvars
+        aws_region = "${{ env.AWS_REGION }}"
+        project_name = "character-sheet"
+        environment = "${{ env.ENVIRONMENT }}"
+        
+        # Database configuration
+        db_password = "${{ secrets.DB_PASSWORD }}"
+        jwt_secret = "${{ secrets.JWT_SECRET }}"
+        
+        # Optional configurations
+        enable_nat_gateway = false
+        ssh_key_name = "${{ secrets.SSH_KEY_NAME }}"
+        api_key = "${{ secrets.API_KEY }}"
+        EOF
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init
+
+    - name: Terraform Validate
+      run: |
+        cd terraform
+        terraform validate
+
+    - name: Terraform Plan
+      id: plan
+      run: |
+        cd terraform
+        terraform plan -detailed-exitcode -out=tfplan
+      continue-on-error: true
+
+    - name: Comment PR with Terraform Plan
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const plan = fs.readFileSync('terraform/tfplan.txt', 'utf8');
+          const maxGitHubBodyCharacters = 65536;
+          
+          function chunkSubstr(str, size) {
+            const numChunks = Math.ceil(str.length / size)
+            const chunks = new Array(numChunks)
+            for (let i = 0, o = 0; i < numChunks; ++i, o += size) {
+              chunks[i] = str.substr(o, size)
+            }
+            return chunks
+          }
+          
+          const planChunks = chunkSubstr(plan, maxGitHubBodyCharacters);
+          
+          for (let i = 0; i < planChunks.length; i++) {
+            const output = `### Terraform Plan Part ${i + 1}
+            \`\`\`
+            ${planChunks[i]}
+            \`\`\``;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+          }
+
+    - name: Terraform Apply
+      if: (github.event.inputs.terraform_action == 'apply' || github.event.inputs.terraform_action == '') && steps.plan.outcome == 'success'
+      run: |
+        cd terraform
+        terraform apply -auto-approve tfplan
+
+    - name: Terraform Destroy
+      if: github.event.inputs.terraform_action == 'destroy'
+      run: |
+        cd terraform
+        terraform destroy -auto-approve
+
+    - name: Get Terraform Outputs
+      if: github.event.inputs.terraform_action != 'destroy'
+      id: tf-output
+      run: |
+        cd terraform
+        echo "cluster_name=$(terraform output -raw eks_cluster_id)" >> $GITHUB_OUTPUT
+        echo "aws_region=$(terraform output -raw aws_region)" >> $GITHUB_OUTPUT
+        echo "external_secrets_role_arn=$(terraform output -raw external_secrets_role_arn)" >> $GITHUB_OUTPUT
+        
+        # Get ECR registry URL
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        echo "ecr_registry=${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
+
+    - name: Create ECR Repository if not exists
+      if: github.event.inputs.terraform_action != 'destroy'
+      run: |
+        aws ecr describe-repositories --repository-names character-sheet-backend --region ${{ env.AWS_REGION }} || \
+        aws ecr create-repository --repository-name character-sheet-backend --region ${{ env.AWS_REGION }}
+
+  deploy-application:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: terraform
+    if: >
+      needs.terraform.result == 'success' && 
+      github.event.inputs.terraform_action != 'destroy' && 
+      github.event.inputs.skip_application_deploy != 'true'
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-AppDeploy
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build and push Docker image
+      run: |
+        # Get commit hash for tagging
+        COMMIT_HASH=${GITHUB_SHA::8}
+        
+        # Build Docker image
+        docker build -t ${{ needs.terraform.outputs.ecr_registry }}/character-sheet-backend:${COMMIT_HASH} ./backend
+        docker tag ${{ needs.terraform.outputs.ecr_registry }}/character-sheet-backend:${COMMIT_HASH} ${{ needs.terraform.outputs.ecr_registry }}/character-sheet-backend:latest
+        
+        # Push to ECR
+        docker push ${{ needs.terraform.outputs.ecr_registry }}/character-sheet-backend:${COMMIT_HASH}
+        docker push ${{ needs.terraform.outputs.ecr_registry }}/character-sheet-backend:latest
+        
+        echo "IMAGE_TAG=${COMMIT_HASH}" >> $GITHUB_ENV
+
+    - name: Install kubectl and Helm
+      run: |
+        # Install kubectl
+        curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        
+        # Install Helm
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+    - name: Configure kubectl
+      run: |
+        aws eks update-kubeconfig --region ${{ needs.terraform.outputs.aws_region }} --name ${{ needs.terraform.outputs.cluster_name }}
+        kubectl get nodes
+
+    - name: Install AWS Load Balancer Controller
+      run: |
+        # Add EKS chart repository
+        helm repo add eks https://aws.github.io/eks-charts
+        helm repo update
+        
+        # Install CRDs
+        kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
+        
+        # Check if ALB controller is already installed
+        if ! helm list -n kube-system | grep -q aws-load-balancer-controller; then
+          # Install AWS Load Balancer Controller
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            -n kube-system \
+            --set clusterName=${{ needs.terraform.outputs.cluster_name }} \
+            --set serviceAccount.create=true \
+            --set serviceAccount.name=aws-load-balancer-controller
+        fi
+
+    - name: Install External Secrets Operator
+      run: |
+        # Add External Secrets chart repository
+        helm repo add external-secrets https://charts.external-secrets.io
+        helm repo update
+        
+        # Check if External Secrets Operator is already installed
+        if ! helm list -n external-secrets-system | grep -q external-secrets; then
+          # Install External Secrets Operator
+          helm install external-secrets external-secrets/external-secrets \
+            -n external-secrets-system \
+            --create-namespace \
+            -f k8s/external-secrets-operator-values.yaml
+        fi
+        
+        # Wait for External Secrets Operator to be ready
+        kubectl wait --for=condition=available --timeout=300s deployment/external-secrets -n external-secrets-system
+        kubectl wait --for=condition=available --timeout=300s deployment/external-secrets-webhook -n external-secrets-system
+
+    - name: Process and deploy Kubernetes manifests
+      run: |
+        cd k8s
+        
+        # Process external secrets template
+        sed -e "s/AWS_REGION_PLACEHOLDER/${{ needs.terraform.outputs.aws_region }}/g" \
+            -e "s|IAM_ROLE_ARN_PLACEHOLDER|${{ needs.terraform.outputs.external_secrets_role_arn }}|g" \
+            external-secrets.yaml > external-secrets-processed.yaml
+        
+        # Replace external secrets file
+        mv external-secrets.yaml external-secrets-original.yaml
+        mv external-secrets-processed.yaml external-secrets.yaml
+        
+        # Update image in deployment
+        sed -i "s|image: character-sheet-backend:.*|image: ${{ needs.terraform.outputs.ecr_registry }}/character-sheet-backend:${IMAGE_TAG}|g" backend-deployment.yaml
+        
+        # Deploy to Kubernetes
+        kubectl apply -k .
+        
+        # Restore original external secrets file
+        mv external-secrets-original.yaml external-secrets.yaml
+
+    - name: Wait for deployment completion
+      run: |
+        echo "Waiting for External Secrets to sync..."
+        kubectl wait --for=condition=Ready externalsecret/postgres-external-secret -n character-sheet --timeout=180s
+        kubectl wait --for=condition=Ready externalsecret/backend-external-secret -n character-sheet --timeout=180s
+        
+        echo "Waiting for deployments to be ready..."
+        kubectl rollout status deployment/postgres-deployment -n character-sheet --timeout=600s
+        kubectl rollout status deployment/backend-deployment -n character-sheet --timeout=600s
+
+    - name: Get deployment information
+      run: |
+        echo "=== Deployment Status ==="
+        kubectl get all -n character-sheet
+        
+        echo "=== External Secrets Status ==="
+        kubectl get externalsecrets -n character-sheet
+        
+        echo "=== Application URL ==="
+        ALB_DNS=$(kubectl get ingress character-sheet-ingress -n character-sheet -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Not available yet")
+        if [ "$ALB_DNS" != "Not available yet" ]; then
+          echo "Application URL: http://${ALB_DNS}"
+          echo "Health Check: http://${ALB_DNS}/health"
+        else
+          echo "ALB DNS not available yet. Check back in a few minutes."
+        fi
+
+    - name: Test application health
+      run: |
+        ALB_DNS=$(kubectl get ingress character-sheet-ingress -n character-sheet -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        
+        if [ -n "$ALB_DNS" ]; then
+          echo "Testing application health..."
+          sleep 60  # Give ALB more time for initial setup
+          
+          for i in {1..10}; do
+            if curl -f -s "http://${ALB_DNS}/health" > /dev/null; then
+              echo "✅ Application health check passed!"
+              break
+            else
+              echo "⏳ Health check attempt $i failed, retrying in 15 seconds..."
+              sleep 15
+            fi
+          done
+        else
+          echo "ALB DNS not available, skipping health check."
+        fi
+
+  summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [terraform, deploy-application]
+    if: always()
+    
+    steps:
+    - name: Deployment Summary
+      run: |
+        echo "## 🚀 Deployment Summary"
+        echo ""
+        
+        if [ "${{ needs.terraform.result }}" == "success" ]; then
+          echo "✅ **Terraform**: Infrastructure deployment successful"
+          echo "📊 **Cluster**: ${{ needs.terraform.outputs.cluster_name }}"
+          echo "🌍 **Region**: ${{ needs.terraform.outputs.aws_region }}"
+        else
+          echo "❌ **Terraform**: Infrastructure deployment failed"
+        fi
+        
+        if [ "${{ needs.deploy-application.result }}" == "success" ]; then
+          echo "✅ **Application**: Deployment successful"
+          echo "📦 **Image**: ${{ needs.terraform.outputs.ecr_registry }}/character-sheet-backend:${GITHUB_SHA::8}"
+        elif [ "${{ needs.deploy-application.result }}" == "skipped" ]; then
+          echo "⏭️ **Application**: Deployment skipped"
+        else
+          echo "❌ **Application**: Deployment failed"
+        fi
+        
+        echo ""
+        echo "### Next Steps"
+        echo "1. Check application status: \`kubectl get all -n character-sheet\`"
+        echo "2. View logs: \`kubectl logs -f deployment/backend-deployment -n character-sheet\`"
+        echo "3. Monitor external secrets: \`kubectl get externalsecrets -n character-sheet\`" 

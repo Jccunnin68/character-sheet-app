@@ -1,6 +1,6 @@
 # Security Group for ALB
 resource "aws_security_group" "alb" {
-  name_prefix = "${var.project_name}-alb-"
+  name        = "character-sheet-alb-sg"
   vpc_id      = aws_vpc.main.id
 
   ingress {

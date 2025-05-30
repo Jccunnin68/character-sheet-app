@@ -1,0 +1,348 @@
+# GitHub Actions Workflow for Infrastructure Deployment
+# This workflow deploys infrastructure to specific environments
+# MANUAL ONLY - All infrastructure changes require manual approval
+
+name: Deploy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment for infrastructure deployment'
+        required: true
+        type: choice
+        options:
+        - dev
+        - preprod
+        - prod
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        default: 'apply'
+        type: choice
+        options:
+        - plan
+        - apply
+        - destroy
+      confirm_destroy:
+        description: 'Type "CONFIRM" to enable destroy action'
+        required: false
+        default: ''
+
+env:
+  AWS_REGION: us-west-2
+  TERRAFORM_VERSION: 1.6.0
+
+jobs:
+  validate-inputs:
+    name: Validate Deployment Inputs
+    runs-on: ubuntu-latest
+    steps:
+    - name: Validate destroy confirmation
+      if: github.event.inputs.action == 'destroy'
+      run: |
+        if [ "${{ github.event.inputs.confirm_destroy }}" != "CONFIRM" ]; then
+          echo "❌ Destroy action requires typing 'CONFIRM' in the confirm_destroy field"
+          exit 1
+        fi
+        echo "✅ Destroy action confirmed"
+
+    - name: Display deployment summary
+      run: |
+        echo "## 🚀 Infrastructure Deployment Summary"
+        echo "**Environment:** ${{ github.event.inputs.environment }}"
+        echo "**Action:** ${{ github.event.inputs.action }}"
+        echo "**Region:** ${{ env.AWS_REGION }}"
+        echo "**Triggered by:** ${{ github.actor }}"
+
+  deploy-dev-infrastructure:
+    name: Deploy Dev Infrastructure
+    runs-on: ubuntu-latest
+    needs: [validate-inputs]
+    if: github.event.inputs.environment == 'dev'
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: 
+      name: dev-infrastructure
+      url: https://console.aws.amazon.com/eks/home?region=us-west-2#/clusters
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials for Dev account
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_DEV_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-DevInfra
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Prepare Dev Infrastructure
+      run: |
+        cd terraform
+        
+        # Copy dev environment configuration
+        cp environments/dev/terraform.tfvars terraform.tfvars
+        
+        # Replace placeholders with actual values
+        sed -i "s/PLACEHOLDER_DB_PASSWORD/${{ secrets.DEV_DB_PASSWORD }}/g" terraform.tfvars
+        sed -i "s/PLACEHOLDER_JWT_SECRET/${{ secrets.DEV_JWT_SECRET }}/g" terraform.tfvars
+        sed -i "s/DEV_ACCOUNT_ID_PLACEHOLDER/${{ secrets.DEV_ACCOUNT_ID }}/g" terraform.tfvars
+        sed -i "s/SHARED_ACCOUNT_ID_PLACEHOLDER/${{ secrets.SHARED_ACCOUNT_ID }}/g" terraform.tfvars
+        
+        echo "📋 Dev infrastructure configuration prepared"
+
+    - name: Terraform Init (Dev)
+      run: |
+        cd terraform
+        terraform init
+
+    - name: Terraform Validate (Dev)
+      run: |
+        cd terraform
+        terraform validate
+
+    - name: Terraform Plan (Dev)
+      id: plan
+      run: |
+        cd terraform
+        terraform plan -detailed-exitcode -out=tfplan
+        echo "Plan completed with exit code: $?"
+      continue-on-error: true
+
+    - name: Terraform Apply (Dev)
+      if: github.event.inputs.action == 'apply' && steps.plan.outcome == 'success'
+      run: |
+        cd terraform
+        echo "🚀 Applying Dev infrastructure changes..."
+        terraform apply -auto-approve tfplan
+
+    - name: Terraform Destroy (Dev)
+      if: github.event.inputs.action == 'destroy'
+      run: |
+        cd terraform
+        echo "⚠️ Destroying Dev infrastructure..."
+        terraform destroy -auto-approve
+
+    - name: Display Dev Infrastructure Outputs
+      if: github.event.inputs.action != 'destroy'
+      run: |
+        cd terraform
+        echo "## 📊 Dev Infrastructure Outputs"
+        terraform output
+
+  deploy-preprod-infrastructure:
+    name: Deploy PreProd Infrastructure
+    runs-on: ubuntu-latest
+    needs: [validate-inputs]
+    if: github.event.inputs.environment == 'preprod'
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: 
+      name: preprod-infrastructure
+      url: https://console.aws.amazon.com/eks/home?region=us-west-2#/clusters
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials for PreProd account
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_PREPROD_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-PreProdInfra
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Prepare PreProd Infrastructure
+      run: |
+        cd terraform
+        
+        # Copy preprod environment configuration
+        cp environments/preprod/terraform.tfvars terraform.tfvars
+        
+        # Replace placeholders with actual values
+        sed -i "s/PLACEHOLDER_DB_PASSWORD/${{ secrets.PREPROD_DB_PASSWORD }}/g" terraform.tfvars
+        sed -i "s/PLACEHOLDER_JWT_SECRET/${{ secrets.PREPROD_JWT_SECRET }}/g" terraform.tfvars
+        sed -i "s/PREPROD_ACCOUNT_ID_PLACEHOLDER/${{ secrets.PREPROD_ACCOUNT_ID }}/g" terraform.tfvars
+        sed -i "s/SHARED_ACCOUNT_ID_PLACEHOLDER/${{ secrets.SHARED_ACCOUNT_ID }}/g" terraform.tfvars
+        
+        echo "📋 PreProd infrastructure configuration prepared"
+
+    - name: Terraform Init (PreProd)
+      run: |
+        cd terraform
+        terraform init
+
+    - name: Terraform Validate (PreProd)
+      run: |
+        cd terraform
+        terraform validate
+
+    - name: Terraform Plan (PreProd)
+      id: plan
+      run: |
+        cd terraform
+        terraform plan -detailed-exitcode -out=tfplan
+        echo "Plan completed with exit code: $?"
+      continue-on-error: true
+
+    - name: Terraform Apply (PreProd)
+      if: github.event.inputs.action == 'apply' && steps.plan.outcome == 'success'
+      run: |
+        cd terraform
+        echo "🚀 Applying PreProd infrastructure changes..."
+        terraform apply -auto-approve tfplan
+
+    - name: Terraform Destroy (PreProd)
+      if: github.event.inputs.action == 'destroy'
+      run: |
+        cd terraform
+        echo "⚠️ Destroying PreProd infrastructure..."
+        terraform destroy -auto-approve
+
+    - name: Display PreProd Infrastructure Outputs
+      if: github.event.inputs.action != 'destroy'
+      run: |
+        cd terraform
+        echo "## 📊 PreProd Infrastructure Outputs"
+        terraform output
+
+  deploy-prod-infrastructure:
+    name: Deploy Production Infrastructure
+    runs-on: ubuntu-latest
+    needs: [validate-inputs]
+    if: github.event.inputs.environment == 'prod'
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: 
+      name: production-infrastructure
+      url: https://console.aws.amazon.com/eks/home?region=us-west-2#/clusters
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials for Production account
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_PROD_ROLE_TO_ASSUME }}
+        role-session-name: GitHubActions-ProdInfra
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Prepare Production Infrastructure
+      run: |
+        cd terraform
+        
+        # Copy production environment configuration
+        cp environments/prod/terraform.tfvars terraform.tfvars
+        
+        # Replace placeholders with actual values
+        sed -i "s/PLACEHOLDER_DB_PASSWORD/${{ secrets.PROD_DB_PASSWORD }}/g" terraform.tfvars
+        sed -i "s/PLACEHOLDER_JWT_SECRET/${{ secrets.PROD_JWT_SECRET }}/g" terraform.tfvars
+        sed -i "s/PLACEHOLDER_API_KEY/${{ secrets.PROD_API_KEY }}/g" terraform.tfvars
+        sed -i "s/PROD_ACCOUNT_ID_PLACEHOLDER/${{ secrets.PROD_ACCOUNT_ID }}/g" terraform.tfvars
+        sed -i "s/SHARED_ACCOUNT_ID_PLACEHOLDER/${{ secrets.SHARED_ACCOUNT_ID }}/g" terraform.tfvars
+        
+        echo "📋 Production infrastructure configuration prepared"
+
+    - name: Terraform Init (Production)
+      run: |
+        cd terraform
+        terraform init
+
+    - name: Terraform Validate (Production)
+      run: |
+        cd terraform
+        terraform validate
+
+    - name: Terraform Plan (Production)
+      id: plan
+      run: |
+        cd terraform
+        terraform plan -detailed-exitcode -out=tfplan
+        echo "Plan completed with exit code: $?"
+      continue-on-error: true
+
+    - name: Terraform Apply (Production)
+      if: github.event.inputs.action == 'apply' && steps.plan.outcome == 'success'
+      run: |
+        cd terraform
+        echo "🚀 Applying Production infrastructure changes..."
+        terraform apply -auto-approve tfplan
+
+    - name: Terraform Destroy (Production)
+      if: github.event.inputs.action == 'destroy'
+      run: |
+        cd terraform
+        echo "⚠️ Destroying Production infrastructure..."
+        terraform destroy -auto-approve
+
+    - name: Display Production Infrastructure Outputs
+      if: github.event.inputs.action != 'destroy'
+      run: |
+        cd terraform
+        echo "## 📊 Production Infrastructure Outputs"
+        terraform output
+
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [deploy-dev-infrastructure, deploy-preprod-infrastructure, deploy-prod-infrastructure]
+    if: always()
+    
+    steps:
+    - name: Generate deployment summary
+      run: |
+        echo "## 🎯 Infrastructure Deployment Summary"
+        echo "**Environment:** ${{ github.event.inputs.environment }}"
+        echo "**Action:** ${{ github.event.inputs.action }}"
+        echo "**Triggered by:** ${{ github.actor }}"
+        echo "**Timestamp:** $(date -u)"
+        
+        # Determine result
+        if [ "${{ needs.deploy-dev-infrastructure.result }}" == "success" ] || \
+           [ "${{ needs.deploy-preprod-infrastructure.result }}" == "success" ] || \
+           [ "${{ needs.deploy-prod-infrastructure.result }}" == "success" ]; then
+          echo "**Status:** ✅ SUCCESS"
+        elif [ "${{ needs.deploy-dev-infrastructure.result }}" == "failure" ] || \
+             [ "${{ needs.deploy-preprod-infrastructure.result }}" == "failure" ] || \
+             [ "${{ needs.deploy-prod-infrastructure.result }}" == "failure" ]; then
+          echo "**Status:** ❌ FAILED"
+        else
+          echo "**Status:** ⏭️ SKIPPED"
+        fi
+        
+        echo ""
+        echo "### Next Steps:"
+        if [ "${{ github.event.inputs.action }}" == "apply" ]; then
+          echo "- Infrastructure is ready for application deployment"
+          echo "- Use 'Deploy Applications' workflow for app updates"
+          echo "- Monitor infrastructure in AWS Console"
+        elif [ "${{ github.event.inputs.action }}" == "destroy" ]; then
+          echo "- Infrastructure has been destroyed"
+          echo "- All data in this environment is permanently deleted"
+        fi 

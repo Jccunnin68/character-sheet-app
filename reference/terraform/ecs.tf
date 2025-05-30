@@ -1,3 +1,25 @@
+# ECS Implementation - REFERENCE ONLY
+# =====================================
+# This file contains the ECS implementation for comparison and reference.
+# The current multi-environment setup uses EKS (see eks.tf).
+# 
+# This ECS implementation was optimized for AWS Free Tier and demonstrates:
+# - ECS on EC2 (better Free Tier utilization than Fargate)
+# - Auto Scaling Groups with single instance for cost optimization
+# - Dynamic port mapping with ALB integration
+# - SSH access for debugging
+# 
+# To use ECS instead of EKS:
+# 1. Copy this file content to a new ecs.tf
+# 2. Update variables.tf for ECS-specific configurations
+# 3. Modify GitHub Actions workflows for ECS deployment
+# 4. Update ALB target groups for ECS service discovery
+#
+# COST COMPARISON (monthly estimates):
+# - EKS Setup: $75+ (EKS control plane) + worker nodes
+# - ECS Setup: $0 (no control plane cost) + EC2 instances only
+# =====================================
+
 # ECS Cluster
 resource "aws_ecs_cluster" "main" {
   name = "${var.project_name}-${var.environment}"
@@ -199,9 +221,9 @@ resource "aws_security_group" "ecs_instances" {
 
   # Dynamic port range for ECS tasks
   ingress {
-    from_port       = 32768
-    to_port         = 65535
-    protocol        = "tcp"
+    from_port   = 32768
+    to_port     = 65535
+    protocol    = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
 
