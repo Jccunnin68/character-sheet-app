@@ -11,7 +11,7 @@ on:
     paths:
       - 'backend/**'
       - 'frontend/**'
-      - 'k8s/**'
+      - 'helm/**'
       - 'docker-compose.yml'
       - 'Dockerfile*'
   workflow_dispatch:
@@ -183,7 +183,9 @@ jobs:
       id-token: write
       contents: read
 
-    environment: dev
+    environment: 
+      name: dev
+      url: https://dev.character-sheet.local
 
     steps:
     - name: Checkout code
@@ -210,7 +212,7 @@ jobs:
 
     - name: Deploy Application to Dev
       run: |
-        cd k8s
+        cd helm/character-sheet
         
         # Get image details
         IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
@@ -218,20 +220,8 @@ jobs:
         
         echo "🚀 Deploying to Dev: ${IMAGE_URI}"
         
-        # Configure External Secrets
-        AWS_REGION_VALUE="${{ env.AWS_REGION }}"
-        EXTERNAL_SECRETS_ROLE_ARN="arn:aws:iam::${{ secrets.DEV_ACCOUNT_ID }}:role/character-sheet-dev-external-secrets-role"
-        
-        sed -e "s/AWS_REGION_PLACEHOLDER/${AWS_REGION_VALUE}/g" \
-            -e "s|IAM_ROLE_ARN_PLACEHOLDER|${EXTERNAL_SECRETS_ROLE_ARN}|g" \
-            external-secrets.yaml > external-secrets-processed.yaml
-        
-        # Update image in deployment
-        sed -i "s|image: character-sheet-backend:.*|image: ${IMAGE_URI}|g" backend-deployment.yaml
-        
-        # Replace external secrets file
-        mv external-secrets.yaml external-secrets-original.yaml
-        mv external-secrets-processed.yaml external-secrets.yaml
+        # Update dependencies
+        helm dependency update
         
         # Install External Secrets Operator if needed
         if ! helm list -n external-secrets-system | grep -q external-secrets; then
@@ -240,36 +230,34 @@ jobs:
           helm install external-secrets external-secrets/external-secrets \
             -n external-secrets-system \
             --create-namespace \
-            -f external-secrets-operator-values.yaml
+            -f ../../k8s/external-secrets-operator-values.yaml
         fi
         
-        # Deploy to Kubernetes
-        kubectl apply -k .
-        
-        # Restore original file
-        mv external-secrets-original.yaml external-secrets.yaml
-
-    - name: Wait for Dev deployment
-      run: |
-        echo "Waiting for deployments to be ready..."
-        kubectl wait --for=condition=available --timeout=600s deployment/backend-deployment -n character-sheet
-        kubectl wait --for=condition=available --timeout=600s deployment/postgres-deployment -n character-sheet
-        
-        echo "✅ Dev deployment completed successfully"
+        # Deploy application using Helm
+        helm upgrade --install character-sheet . \
+          --namespace character-sheet \
+          --create-namespace \
+          --set backend.image.repository=${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend \
+          --set backend.image.tag=${IMAGE_TAG} \
+          --set global.environment=dev \
+          --set global.domain=dev.character-sheet.local \
+          --set externalSecrets.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::${{ secrets.DEV_ACCOUNT_ID }}:role/character-sheet-dev-external-secrets-role
 
   deploy-preprod:
     name: Deploy to PreProd Environment
     runs-on: ubuntu-latest
     needs: [build-and-push]
     if: >
-      (github.event_name == 'push' && github.ref == 'refs/heads/release') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/release') || 
       (github.event_name == 'workflow_dispatch' && github.event.inputs.target_environment == 'preprod')
     
     permissions:
       id-token: write
       contents: read
 
-    environment: preprod
+    environment: 
+      name: preprod
+      url: https://preprod.character-sheet.local
 
     steps:
     - name: Checkout code
@@ -296,28 +284,16 @@ jobs:
 
     - name: Deploy Application to PreProd
       run: |
-        cd k8s
+        cd helm/character-sheet
         
-        # Get image details (already tagged as preprod from build step)
+        # Get image details
         IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
         IMAGE_URI="${{ needs.build-and-push.outputs.image_uri }}"
         
         echo "🚀 Deploying to PreProd: ${IMAGE_URI}"
         
-        # Configure External Secrets
-        AWS_REGION_VALUE="${{ env.AWS_REGION }}"
-        EXTERNAL_SECRETS_ROLE_ARN="arn:aws:iam::${{ secrets.PREPROD_ACCOUNT_ID }}:role/character-sheet-preprod-external-secrets-role"
-        
-        sed -e "s/AWS_REGION_PLACEHOLDER/${AWS_REGION_VALUE}/g" \
-            -e "s|IAM_ROLE_ARN_PLACEHOLDER|${EXTERNAL_SECRETS_ROLE_ARN}|g" \
-            external-secrets.yaml > external-secrets-processed.yaml
-        
-        # Update image in deployment
-        sed -i "s|image: character-sheet-backend:.*|image: ${IMAGE_URI}|g" backend-deployment.yaml
-        
-        # Replace external secrets file
-        mv external-secrets.yaml external-secrets-original.yaml
-        mv external-secrets-processed.yaml external-secrets.yaml
+        # Update dependencies
+        helm dependency update
         
         # Install External Secrets Operator if needed
         if ! helm list -n external-secrets-system | grep -q external-secrets; then
@@ -326,24 +302,20 @@ jobs:
           helm install external-secrets external-secrets/external-secrets \
             -n external-secrets-system \
             --create-namespace \
-            -f external-secrets-operator-values.yaml
+            -f ../../k8s/external-secrets-operator-values.yaml
         fi
         
-        # Deploy to Kubernetes
-        kubectl apply -k .
-        
-        # Restore original file
-        mv external-secrets-original.yaml external-secrets.yaml
+        # Deploy application using Helm
+        helm upgrade --install character-sheet . \
+          --namespace character-sheet \
+          --create-namespace \
+          --set backend.image.repository=${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend \
+          --set backend.image.tag=${IMAGE_TAG} \
+          --set global.environment=preprod \
+          --set global.domain=preprod.character-sheet.local \
+          --set externalSecrets.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::${{ secrets.PREPROD_ACCOUNT_ID }}:role/character-sheet-preprod-external-secrets-role
 
-    - name: Wait for PreProd deployment
-      run: |
-        echo "Waiting for deployments to be ready..."
-        kubectl wait --for=condition=available --timeout=600s deployment/backend-deployment -n character-sheet
-        kubectl wait --for=condition=available --timeout=600s deployment/postgres-deployment -n character-sheet
-        
-        echo "✅ PreProd deployment completed successfully"
-
-  deploy-production:
+  deploy-prod:
     name: Deploy to Production Environment
     runs-on: ubuntu-latest
     needs: [promote-for-production]
@@ -352,10 +324,9 @@ jobs:
     permissions:
       id-token: write
       contents: read
-
     environment: 
       name: production
-      url: https://production.character-sheet.com
+      url: https://character-sheet.local
 
     steps:
     - name: Checkout code
@@ -380,36 +351,18 @@ jobs:
       run: |
         aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name character-sheet-prod-eks
 
-    - name: Verify cluster access and status
-      run: |
-        echo "=== Production Cluster Information ==="
-        kubectl get nodes
-        kubectl get namespaces
-        kubectl get pods --all-namespaces
-
     - name: Deploy Application to Production
       run: |
-        cd k8s
+        cd helm/character-sheet
         
-        # Get promoted image
-        PROD_IMAGE="${{ needs.promote-for-production.outputs.prod_image_uri }}"
+        # Get image details
+        IMAGE_TAG="${{ needs.promote-for-production.outputs.prod_image_tag }}"
+        IMAGE_URI="${{ needs.promote-for-production.outputs.prod_image_uri }}"
         
-        echo "🚀 Deploying to Production: ${PROD_IMAGE}"
+        echo "🚀 Deploying to Production: ${IMAGE_URI}"
         
-        # Configure External Secrets
-        AWS_REGION_VALUE="${{ env.AWS_REGION }}"
-        EXTERNAL_SECRETS_ROLE_ARN="arn:aws:iam::${{ secrets.PROD_ACCOUNT_ID }}:role/character-sheet-prod-external-secrets-role"
-        
-        sed -e "s/AWS_REGION_PLACEHOLDER/${AWS_REGION_VALUE}/g" \
-            -e "s|IAM_ROLE_ARN_PLACEHOLDER|${EXTERNAL_SECRETS_ROLE_ARN}|g" \
-            external-secrets.yaml > external-secrets-processed.yaml
-        
-        # Update image in deployment
-        sed -i "s|image: character-sheet-backend:.*|image: ${PROD_IMAGE}|g" backend-deployment.yaml
-        
-        # Replace external secrets file
-        mv external-secrets.yaml external-secrets-original.yaml
-        mv external-secrets-processed.yaml external-secrets.yaml
+        # Update dependencies
+        helm dependency update
         
         # Install External Secrets Operator if needed
         if ! helm list -n external-secrets-system | grep -q external-secrets; then
@@ -418,62 +371,23 @@ jobs:
           helm install external-secrets external-secrets/external-secrets \
             -n external-secrets-system \
             --create-namespace \
-            -f external-secrets-operator-values.yaml
+            -f ../../k8s/external-secrets-operator-values.yaml
         fi
         
-        # Deploy to Kubernetes
-        kubectl apply -k .
-        
-        # Restore original file
-        mv external-secrets-original.yaml external-secrets.yaml
-
-    - name: Wait for Production deployment with enhanced health checks
-      run: |
-        echo "Waiting for External Secrets to sync..."
-        kubectl wait --for=condition=Ready externalsecret/postgres-external-secret -n character-sheet --timeout=300s
-        kubectl wait --for=condition=Ready externalsecret/backend-external-secret -n character-sheet --timeout=300s
-        
-        echo "Waiting for deployments to be ready..."
-        kubectl rollout status deployment/postgres-deployment -n character-sheet --timeout=600s
-        kubectl rollout status deployment/backend-deployment -n character-sheet --timeout=600s
-        
-        echo "✅ Production deployment completed successfully"
-
-    - name: Production health check and verification
-      run: |
-        echo "=== Production Deployment Verification ==="
-        
-        # Get application URL
-        ALB_DNS=$(kubectl get ingress character-sheet-ingress -n character-sheet -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        
-        if [ -n "$ALB_DNS" ]; then
-          echo "🌐 Application URL: https://${ALB_DNS}"
-          echo "🔍 Health Check URL: https://${ALB_DNS}/health"
-          
-          # Wait for ALB to be ready and test health endpoint
-          echo "Testing application health..."
-          sleep 120  # Give ALB time for initial setup
-          
-          for i in {1..20}; do
-            if curl -f -s "https://${ALB_DNS}/health" > /dev/null; then
-              echo "✅ Production application health check passed!"
-              break
-            else
-              echo "⏳ Health check attempt $i failed, retrying in 30 seconds..."
-              sleep 30
-            fi
-          done
-        else
-          echo "⚠️ ALB DNS not available yet, manual verification required"
-        fi
-        
-        echo "=== Production Deployment Summary ==="
-        kubectl get all -n character-sheet
+        # Deploy application using Helm
+        helm upgrade --install character-sheet . \
+          --namespace character-sheet \
+          --create-namespace \
+          --set backend.image.repository=${{ env.SHARED_ECR_REGISTRY }}/character-sheet-backend \
+          --set backend.image.tag=${IMAGE_TAG} \
+          --set global.environment=prod \
+          --set global.domain=character-sheet.local \
+          --set externalSecrets.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::${{ secrets.PROD_ACCOUNT_ID }}:role/character-sheet-prod-external-secrets-role
 
   deployment-summary:
     name: Deployment Summary
     runs-on: ubuntu-latest
-    needs: [build-and-push, deploy-dev, deploy-preprod, deploy-production, promote-for-production]
+    needs: [build-and-push, deploy-dev, deploy-preprod, deploy-prod, promote-for-production]
     if: always()
     
     steps:
@@ -519,9 +433,9 @@ jobs:
         fi
         
         # Production results
-        if [ "${{ needs.deploy-production.result }}" == "success" ]; then
+        if [ "${{ needs.deploy-prod.result }}" == "success" ]; then
           echo "- ✅ **Production**: Deployment successful"
-        elif [ "${{ needs.deploy-production.result }}" == "failure" ]; then
+        elif [ "${{ needs.deploy-prod.result }}" == "failure" ]; then
           echo "- ❌ **Production**: Deployment failed"
         else
           echo "- ⏭️ **Production**: Deployment skipped"

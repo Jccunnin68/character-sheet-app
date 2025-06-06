@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: character-sheet
+  labels:
+    name: character-sheet
+    {{- include "character-sheet.labels" . | nindent 4 }} 

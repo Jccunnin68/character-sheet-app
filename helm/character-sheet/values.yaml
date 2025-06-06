@@ -1,0 +1,91 @@
+# Global settings
+global:
+  environment: production
+  domain: character-sheet.local
+
+# Backend configuration
+backend:
+  image:
+    repository: character-sheet-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    port: 8000
+  env:
+    - name: DATABASE_URL
+      valueFrom:
+        secretKeyRef:
+          name: character-sheet-secrets
+          key: database-url
+    - name: JWT_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: character-sheet-secrets
+          key: jwt-secret
+
+# Database configuration
+postgres:
+  image:
+    repository: postgres
+    tag: "15"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    port: 5432
+  env:
+    - name: POSTGRES_DB
+      value: character_sheet
+    - name: POSTGRES_USER
+      valueFrom:
+        secretKeyRef:
+          name: character-sheet-secrets
+          key: postgres-user
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: character-sheet-secrets
+          key: postgres-password
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: character-sheet.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: character-sheet-tls
+      hosts:
+        - character-sheet.local
+
+# External Secrets configuration
+externalSecrets:
+  enabled: true
+  serviceAccount:
+    create: true
+    name: external-secrets
+  installCRDs: true 

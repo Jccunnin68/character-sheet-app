@@ -1,0 +1,10 @@
+apiVersion: v2
+name: character-sheet
+description: A Helm chart for Character Sheet Application
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  - name: external-secrets
+    version: "0.9.5"
+    repository: https://charts.external-secrets.io 
